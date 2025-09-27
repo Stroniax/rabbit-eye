@@ -15,3 +15,11 @@ Windows service events.
 | SIGINT | | Terminate the application |
 | | | Suspend the polling, keep the app running |
 | SIGCONT | | Resume polling when suspended |
+
+There are two forms that rabbit-eye events may be produced.
+1. Schedule-based
+    A timer prompts an observer to scan a data set. The data is hashed and compared with the previous
+    set of data. Changes are published.
+2. Event-based
+    An OS or application event is raised. For example a filesystemwatcher may raise events,
+    or a network endpoint may receive messages, that then get turned into RabbitMq messages.
