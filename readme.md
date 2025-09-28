@@ -30,7 +30,7 @@ There are two forms that rabbit-eye events may be produced.
 
 ## Contributing
 
-Use `<repo-root>/packages/.cargo/config.toml` to 
+Use `<repo-root>/.cargo/config.toml` to 
 [configure the environment](https://doc.rust-lang.org/cargo/reference/config.html#configuration-format)
 which propagates to running a program in development (`cargo run`). This file specifically
 is in the `.gitignore`. Other `config.toml` files may be tracked and contain shared application
