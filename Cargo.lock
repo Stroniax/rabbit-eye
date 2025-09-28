@@ -218,6 +218,7 @@ name = "message-to-console"
 version = "0.1.0"
 dependencies = [
  "amqprs",
+ "async-trait",
  "tokio",
 ]
 

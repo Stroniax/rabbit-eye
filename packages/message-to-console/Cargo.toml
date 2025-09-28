@@ -1,0 +1,9 @@
+[package]
+name = "message-to-console"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+amqprs = { version = "2.1.2" }
+async-trait = "0.1.89"
+tokio = "1.47.1"
