@@ -1,11 +1,11 @@
-use std::{env, error::Error};
+use std::{env, error::Error, os::windows::fs::MetadataExt};
 
 use amqprs::{
     BasicProperties,
     channel::{BasicPublishArguments, Channel},
     connection::{Connection, OpenConnectionArguments},
 };
-use tokio::{join, select, task::JoinHandle};
+use tokio::{select, task::JoinHandle};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -34,17 +34,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok::<(), String>(())
     });
 
+    struct CtrlC;
+
     loop {
-        select! {
+        let res_or_stop = select! {
             _ = &mut ctrlc => {
                 println!("Ctr+C pressed. Halting loop.");
+                Err(CtrlC)
             }
             _ = interval.tick() => {
                 println!("Starting next interval.");
+                Ok(())
             }
-        }
+        };
 
-        if ctrlc.is_finished() {
+        if let Err(_) = res_or_stop {
             print!("Ctrl+C pressed.");
             if let Some(handle) = doing_work.take() {
                 let ten_seconds = tokio::time::Duration::from_secs(10);
@@ -63,7 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        match doing_work {
+        match doing_work.take() {
             Some(handle) => {
                 println!("Work was ongoing. It is being stopped.");
                 handle.abort();
@@ -79,7 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _pod = PrintOnDrop;
             loop {
                 println!("Doing some work (iter {}).", i);
-                tokio::time::sleep(tokio::time::Duration::from_millis(1_000)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 i = i + 1;
                 // if i > 3 {
                 //     break;
@@ -102,12 +106,14 @@ impl Drop for PrintOnDrop {
 
 async fn check_and_report_files(channel: &Channel) -> Result<(), Box<dyn Error>> {
     let mut root = tokio::fs::read_dir("C:").await?;
-    loop {
-        let dir_or_file = root.next_entry().await?;
+    while let Some(dir_or_file) = root.next_entry().await? {
+        let metadata = dir_or_file.metadata().await?;
 
-        if let Some(dir_or_file) = dir_or_file {
-            dir_or_file.metadata().await?.is_dir();
-        }
+        println!(
+            "File {:?} last written to at {}",
+            dir_or_file.file_name(),
+            metadata.last_write_time()
+        );
     }
 
     let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
