@@ -35,3 +35,10 @@ Use `<repo-root>/.cargo/config.toml` to
 which propagates to running a program in development (`cargo run`). This file specifically
 is in the `.gitignore`. Other `config.toml` files may be tracked and contain shared application
 configurations.
+
+Launch the `message-to-console` app (intended for debugging, not to be published) to
+observe messages produced by a `rabbit-eye` observer.
+
+```PowerShell
+PS \> cargo run --bin message-to-console
+```

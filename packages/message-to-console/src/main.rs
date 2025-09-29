@@ -1,17 +1,12 @@
-use std::{env, error::Error, time::Duration};
-
 use amqprs::{
     Ack, BasicProperties, Cancel, CloseChannel, Deliver, Nack, Return,
-    callbacks::{self, ChannelCallback},
-    channel::{
-        BasicAckArguments, BasicConsumeArguments, Channel, QueueBindArguments,
-        QueueDeclareArguments,
-    },
+    callbacks::ChannelCallback,
+    channel::{BasicAckArguments, BasicConsumeArguments, Channel, QueueDeclareArguments},
     connection::{Connection, OpenConnectionArguments},
-    consumer::{self, AsyncConsumer, DefaultConsumer},
+    consumer::AsyncConsumer,
 };
 use async_trait::async_trait;
-use tokio::time;
+use std::{env, error::Error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -25,11 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let channel = connection.open_channel(None).await?;
 
-    if !channel.is_open() {
-        panic!("Channel is not open.");
-    }
-
-    println!("Channel open. Declaring queue...");
+    eprintln!("Channel open. Declaring queue...");
 
     let (queue, message_count, consumer_count) = channel
         .queue_declare(
@@ -40,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?
         .unwrap();
 
-    println!(
+    eprintln!(
         "Queue declared ({}, message count: {}, consumer count: {}). Still open? {}. Binding...",
         queue,
         message_count,
@@ -48,33 +39,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         channel.is_open()
     );
 
-    // channel
-    //     .queue_bind(
-    //         QueueBindArguments::default()
-    //             .queue(String::from("rabbit-eye-dev"))
-    //             .finish(),
-    //     )
-    //     .await?;
-    // println!("Queue bound. Registering callback...");
-
     channel.register_callback(EprintlnChannelCallback).await?;
 
-    println!("Callback registered. Consuming...");
+    eprintln!("Callback registered. Consuming...");
 
     let consume_args = BasicConsumeArguments::new(&queue, "");
     // let consumer = DefaultConsumer::new(false);
-    let consumer = EprintlnConsumer;
+    let consumer = PrintlnConsumer;
     channel.basic_consume(consumer, consume_args).await?;
 
-    println!("Consumer registered. Activating...");
+    eprintln!("Consumer registered. Activating...");
 
     channel.flow(true).await?;
 
-    println!("Flow active. Waiting...");
+    eprintln!("Flow active. Waiting...");
 
-    time::sleep(Duration::from_millis(60_000)).await;
+    tokio::signal::ctrl_c().await?;
 
-    println!("Wait completed. Closing application.");
+    eprintln!("Ctrl+C received. Shutting down.");
 
     Ok(())
 }
@@ -147,18 +129,18 @@ impl ChannelCallback for EprintlnChannelCallback {
     }
 }
 
-struct EprintlnConsumer;
+struct PrintlnConsumer;
 
 #[async_trait]
-impl AsyncConsumer for EprintlnConsumer {
+impl AsyncConsumer for PrintlnConsumer {
     async fn consume(
         &mut self,
         channel: &Channel,
         deliver: Deliver,
-        basic_properties: BasicProperties,
+        _basic_properties: BasicProperties,
         content: Vec<u8>,
     ) {
-        eprintln!(
+        println!(
             "Consumed message on channel {}: delivery_tag={}, content size={}",
             channel,
             deliver.delivery_tag(),
