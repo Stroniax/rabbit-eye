@@ -1,4 +1,9 @@
-use std::{env, error::Error, os::windows::fs::MetadataExt};
+use std::{
+    env,
+    error::Error,
+    os::windows::fs::MetadataExt,
+    sync::{Arc, Mutex},
+};
 
 use amqprs::{
     BasicProperties,
@@ -34,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok::<(), String>(())
     });
 
-    struct CtrlC;
+    let mut canc = CooperativeCancellation::new();
 
     loop {
         let res_or_stop = select! {
@@ -47,20 +52,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Ok(())
             }
         };
+        // let canc = canc.clone();
 
         if let Err(_) = res_or_stop {
             print!("Ctrl+C pressed.");
-            if let Some(handle) = doing_work.take() {
-                let ten_seconds = tokio::time::Duration::from_secs(10);
-                println!(" Waiting 10s for work to finish.");
-                let timed_out = tokio::time::timeout(ten_seconds, handle).await;
-                match timed_out {
-                    Err(_) => {
-                        println!("Aborted after time-out.");
-                        todo!("Panic here or allow graceful shutdown to report.");
+            if let Some(mut handle) = doing_work.take() {
+                // First, wait 5s to see if it completes on its own
+                println!(" Waiting 5s for graceful completion.");
+                let five_seconds = tokio::time::Duration::from_secs(5);
+                select! {
+                    _ = &mut handle => {
+                        println!("Work finished while waiting five seconds for graceful completion.");
+                        break;
                     }
-                    Ok(result) => result?,
-                }
+                    _ = tokio::time::sleep(five_seconds) => {
+                        println!("Work still ongoing after five seconds.");
+                    }
+                };
+
+                // Then, trigger the cooperative cancellation and see if it completes on its own
+                canc.cancel().await;
+                println!("Waiting 5s for cooperative cancellation.");
+                select! {
+                    _ = &mut handle => {
+                        println!("Work finished during cooperative cancellation.");
+                        break;
+                    },
+                    _ = tokio::time::sleep(five_seconds) => {
+                        println!("Work still ongoing after ten seconds.");
+                    }
+                };
+
+                // Finally, abort because it will not stop gracefully
+                println!("Aborting because no cancellation attempt was heeded.");
+                handle.abort();
             } else {
                 println!(" No work is ongoing.");
             }
@@ -76,6 +101,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let channel_clone = channel.clone();
+        let canc = canc.clone();
         doing_work = Some(tokio::spawn(async move {
             check_and_report_files(&channel_clone).await.unwrap();
 
@@ -85,6 +111,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Doing some work (iter {}).", i);
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 i = i + 1;
+
+                if i > 7 && canc.cancelled().await {
+                    println!("Cancellation requested. Breaking loop.");
+                    break;
+                }
                 // if i > 3 {
                 //     break;
                 // }
@@ -122,4 +153,35 @@ async fn check_and_report_files(channel: &Channel) -> Result<(), Box<dyn Error>>
         .await?;
 
     Ok(())
+}
+
+struct CtrlC;
+
+struct CooperativeCancellation {
+    cancelled: Arc<tokio::sync::Mutex<bool>>,
+}
+
+impl CooperativeCancellation {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(tokio::sync::Mutex::new(false)),
+        }
+    }
+
+    pub async fn cancelled(&self) -> bool {
+        *self.cancelled.lock().await
+    }
+
+    pub async fn cancel(&mut self) -> () {
+        let mut lock = self.cancelled.lock().await;
+        *lock = true;
+    }
+}
+
+impl Clone for CooperativeCancellation {
+    fn clone(&self) -> Self {
+        Self {
+            cancelled: self.cancelled.clone(),
+        }
+    }
 }
