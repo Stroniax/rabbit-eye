@@ -29,10 +29,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut doing_work: Option<JoinHandle<()>> = None;
 
-    let ctrlc = tokio::spawn(async {
+    let mut ctrlc = tokio::spawn(async {
         tokio::signal::ctrl_c()
             .await
-            .map_err(|e| format!("{:?}", e))?;
+            .map_err(|e| format!("Ctrl+C handler error: {:?}", e))?;
 
         println!("Ctrl+C pressed. Signaling shutdown.");
 
@@ -40,13 +40,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     loop {
-        interval.tick().await;
+        select! {
+            _ = &mut ctrlc => {
+                println!("Ctr+C pressed. Halting loop.");
+            }
+            _ = interval.tick() => {
+                println!("Starting next interval.");
+            }
+        }
 
         if ctrlc.is_finished() {
             print!("Ctrl+C pressed.");
             if let Some(handle) = doing_work.take() {
-                println!(" Waiting for work to finish.");
-                handle.await?;
+                let ten_seconds = tokio::time::Duration::from_secs(10);
+                println!(" Waiting 10s for work to finish.");
+                let timed_out = tokio::time::timeout(ten_seconds, handle).await;
+                match timed_out {
+                    Err(_) => {
+                        println!("Aborted after time-out.");
+                        todo!("Panic here or allow graceful shutdown to report.");
+                    }
+                    Ok(result) => result?,
+                }
             } else {
                 println!(" No work is ongoing.");
             }
@@ -68,9 +83,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Doing some work (iter {}).", i);
                 tokio::time::sleep(tokio::time::Duration::from_millis(1_000)).await;
                 i = i + 1;
-                if i > 3 {
-                    break;
-                }
+                // if i > 3 {
+                //     break;
+                // }
             }
         }));
     }
