@@ -1,16 +1,11 @@
-use std::{
-    env,
-    error::Error,
-    os::windows::fs::MetadataExt,
-    sync::{Arc, Mutex},
-};
-
 use amqprs::{
     BasicProperties,
     channel::{BasicPublishArguments, Channel},
     connection::{Connection, OpenConnectionArguments},
 };
+use std::{env, error::Error, os::windows::fs::MetadataExt};
 use tokio::{select, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,7 +19,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let channel = connection.open_channel(None).await?;
 
-    let period = tokio::time::Duration::from_millis(5_000);
+    let period = tokio::time::Duration::from_secs(5);
     let mut interval = tokio::time::interval(period);
 
     let mut doing_work: Option<JoinHandle<()>> = None;
@@ -39,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok::<(), String>(())
     });
 
-    let mut canc = CooperativeCancellation::new();
+    let canc = CancellationToken::new();
 
     loop {
         let res_or_stop = select! {
@@ -71,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 };
 
                 // Then, trigger the cooperative cancellation and see if it completes on its own
-                canc.cancel().await;
+                canc.cancel();
                 println!("Waiting 5s for cooperative cancellation.");
                 select! {
                     _ = &mut handle => {
@@ -86,6 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // Finally, abort because it will not stop gracefully
                 println!("Aborting because no cancellation attempt was heeded.");
                 handle.abort();
+                panic!("The program could not stop gracefully. Work had to be aborted.");
             } else {
                 println!(" No work is ongoing.");
             }
@@ -112,13 +108,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 i = i + 1;
 
-                if i > 7 && canc.cancelled().await {
+                if canc.is_cancelled() {
                     println!("Cancellation requested. Breaking loop.");
                     break;
                 }
-                // if i > 3 {
-                //     break;
-                // }
             }
         }));
     }
@@ -156,32 +149,3 @@ async fn check_and_report_files(channel: &Channel) -> Result<(), Box<dyn Error>>
 }
 
 struct CtrlC;
-
-struct CooperativeCancellation {
-    cancelled: Arc<tokio::sync::Mutex<bool>>,
-}
-
-impl CooperativeCancellation {
-    pub fn new() -> Self {
-        Self {
-            cancelled: Arc::new(tokio::sync::Mutex::new(false)),
-        }
-    }
-
-    pub async fn cancelled(&self) -> bool {
-        *self.cancelled.lock().await
-    }
-
-    pub async fn cancel(&mut self) -> () {
-        let mut lock = self.cancelled.lock().await;
-        *lock = true;
-    }
-}
-
-impl Clone for CooperativeCancellation {
-    fn clone(&self) -> Self {
-        Self {
-            cancelled: self.cancelled.clone(),
-        }
-    }
-}
