@@ -2,7 +2,7 @@ use std::{env, error::Error};
 
 use amqprs::{
     BasicProperties,
-    channel::BasicPublishArguments,
+    channel::{BasicPublishArguments, Channel},
     connection::{Connection, OpenConnectionArguments},
 };
 use tokio::{join, select, task::JoinHandle};
@@ -18,11 +18,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let connection = Connection::open(&args).await?;
 
     let channel = connection.open_channel(None).await?;
-
-    let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
-    channel
-        .basic_publish(BasicProperties::default(), vec![], publish_args)
-        .await?;
 
     let period = tokio::time::Duration::from_millis(5_000);
     let mut interval = tokio::time::interval(period);
@@ -76,7 +71,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ => {}
         }
 
-        doing_work = Some(tokio::spawn(async {
+        let channel_clone = channel.clone();
+        doing_work = Some(tokio::spawn(async move {
+            check_and_report_files(&channel_clone).await.unwrap();
+
             let mut i = 0;
             let _pod = PrintOnDrop;
             loop {
@@ -100,4 +98,22 @@ impl Drop for PrintOnDrop {
     fn drop(&mut self) {
         println!("Dropped.");
     }
+}
+
+async fn check_and_report_files(channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let mut root = tokio::fs::read_dir("C:").await?;
+    loop {
+        let dir_or_file = root.next_entry().await?;
+
+        if let Some(dir_or_file) = dir_or_file {
+            dir_or_file.metadata().await?.is_dir();
+        }
+    }
+
+    let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
+    channel
+        .basic_publish(BasicProperties::default(), vec![], publish_args)
+        .await?;
+
+    Ok(())
 }
