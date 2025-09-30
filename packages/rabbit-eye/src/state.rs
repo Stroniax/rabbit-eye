@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, hash_map::Drain},
+    collections::{HashMap, HashSet, hash_map::Drain},
     hash::Hash,
+    iter::Map,
     marker::PhantomData,
 };
 
@@ -95,6 +96,208 @@ mod test_persistence {
 }
 
 pub use persist::*;
+
+mod state_change {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Debug)]
+    pub enum StateChange<Key> {
+        New(Key),
+        Update(Key),
+        Delete(Key),
+    }
+
+    #[derive(Debug)]
+    pub enum NotifiedState<Key> {
+        None(Key),
+        New(Key),
+        Update(Key),
+        Delete(Key),
+    }
+
+    pub trait TableState {
+        type Key;
+        type Hash;
+
+        /// Notifies the state that the key is present, and has the provided hash.
+        /// Internally, the state shall record the change type from its internal
+        /// state of the key.
+        fn set_row(&mut self, key: Self::Key, hash: Self::Hash);
+
+        /// Consumes the state and produces the change set. This change set should be merged into
+        /// persistence and notified to the message bus.
+        /// `delete_remainder` determines if anything not passed to `set_presence` should be
+        /// considered deleted. This flag should be set if the state was able to be updated
+        /// fully, and should be `false` if the change detector was stopped prematurely.
+        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Self::Key>>;
+    }
+
+    #[derive(Debug)]
+    pub struct DefaultTableState<Key, Hash> {
+        tablehash: Option<u64>,
+        rows: HashMap<Key, Hash>,
+        changes: Vec<NotifiedState<Key>>,
+    }
+
+    impl<Key, Hash> DefaultTableState<Key, Hash> {
+        pub fn new(tablehash: Option<u64>, rows: HashMap<Key, Hash>) -> Self {
+            Self {
+                tablehash,
+                rows,
+                changes: vec![],
+            }
+        }
+    }
+
+    impl<Key, Hash> Default for DefaultTableState<Key, Hash> {
+        fn default() -> Self {
+            Self::new(None, HashMap::new())
+        }
+    }
+
+    impl<Key, Hash> TableState for DefaultTableState<Key, Hash>
+    where
+        Key: Eq + std::hash::Hash + Clone,
+        Hash: Eq,
+    {
+        type Key = Key;
+        type Hash = Hash;
+
+        fn set_row(&mut self, key: Self::Key, hash: Self::Hash) {
+            if let Some(value) = self.rows.get_mut(&key) {
+                if value == &hash {
+                    self.changes.push(NotifiedState::None(key));
+                } else {
+                    *value = hash;
+                    self.changes.push(NotifiedState::Update(key));
+                }
+            } else {
+                self.changes.push(NotifiedState::New(key.clone()));
+                self.rows.insert(key, hash);
+            }
+        }
+
+        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Self::Key>> {
+            // For each item in self.rows, check for a change in self.changes.
+            // If there is no change and delete_remainder = true, produce a Delete
+            // If there is a change, map it to the proper change type
+            // Then drain the rest of the changes (which should all be inserts at this point)
+            // and publish them also
+
+            let mut changes = Vec::new();
+            let mut unseen = HashSet::new();
+
+            if delete_remainder {
+                for key in self.rows.keys() {
+                    unseen.insert(key);
+                }
+            }
+
+            for seen in self.changes {
+                match seen {
+                    NotifiedState::Delete(k) => {
+                        unseen.remove(&k);
+                        changes.push(StateChange::Delete(k))
+                    }
+                    NotifiedState::New(k) => {
+                        unseen.remove(&k);
+                        changes.push(StateChange::New(k));
+                    }
+                    NotifiedState::Update(k) => {
+                        unseen.remove(&k);
+                        changes.push(StateChange::Update(k));
+                    }
+                    NotifiedState::None(k) => {
+                        unseen.remove(&k);
+                    }
+                }
+            }
+
+            for rem in unseen {
+                changes.push(StateChange::Delete(rem.to_owned()));
+            }
+
+            changes.into_iter()
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_state_change {
+    use super::state_change::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn drain_new() {
+        let mut ts = DefaultTableState::<i32, i32>::default();
+
+        ts.set_row(1, 11);
+
+        let drain: Vec<_> = ts.drain(true).collect();
+
+        assert_eq!(1, drain.len());
+        match drain.get(0).unwrap() {
+            StateChange::New(_) => {}
+            or => panic!("The wrong state change type was discovered. {:?}", or),
+        }
+    }
+
+    #[test]
+    fn drain_delete_no_remainder() {
+        let mut hash = HashMap::new();
+        hash.insert(1, 31);
+        let ts = DefaultTableState::new(None, hash);
+
+        let drain: Vec<_> = ts.drain(false).collect();
+
+        assert!(drain.is_empty());
+    }
+
+    #[test]
+    fn drain_delete_remainder() {
+        let mut hash = HashMap::new();
+        hash.insert(1, 31);
+        let ts = DefaultTableState::new(None, hash);
+
+        let drain: Vec<_> = ts.drain(true).collect();
+
+        assert_eq!(1, drain.len());
+        match drain.get(0).unwrap() {
+            StateChange::Delete(id) => assert_eq!(1, *id),
+            or => panic!("Expected a Delete but got {:?}", or),
+        }
+    }
+
+    #[test]
+    fn drain_update() {
+        let mut hash = HashMap::new();
+        hash.insert(1, 31);
+        let mut ts = DefaultTableState::new(None, hash);
+        ts.set_row(1, 90);
+
+        let drain: Vec<_> = ts.drain(true).collect();
+
+        assert_eq!(1, drain.len());
+        match drain.get(0).unwrap() {
+            StateChange::Update(id) => assert_eq!(1, *id),
+            or => panic!("Expected an Update but got {:?}", or),
+        }
+    }
+
+    #[test]
+    fn drain_set_to_same_value() {
+        let mut hash = HashMap::new();
+        hash.insert(1, 31);
+        let mut ts = DefaultTableState::new(None, hash);
+        ts.set_row(1, 31);
+
+        let drain: Vec<_> = ts.drain(true).collect();
+
+        assert_eq!(0, drain.len());
+    }
+}
+
+pub use state_change::*;
 
 /// State of a singular row, compared with the computed states to see if there was a change.
 pub struct RowState {
