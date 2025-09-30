@@ -6,56 +6,95 @@ use std::{
 
 use crate::sync::CancellationToken;
 
-pub trait StatePersistence {
-    type State;
+mod persist {
+    use std::marker::PhantomData;
 
-    /// Load the persisted state. This should be a highly tolerant method; if state is corrupted
-    /// it is better to reset than to return an error because the application will not be able
-    /// to resolve an error and will not be able to run.
-    async fn load() -> Result<Self::State, Box<dyn std::error::Error>>;
+    pub trait StatePersistence {
+        type State;
 
-    /// Persist the state for loading later by `load`.
-    async fn save(self, state: &Self::State) -> Result<(), Box<dyn std::error::Error>>;
+        /// Load the persisted state. This should be a highly tolerant method; if state is corrupted
+        /// it is better to reset than to return an error because the application will not be able
+        /// to resolve an error and will not be able to run.
+        #[allow(async_fn_in_trait)]
+        async fn load() -> Result<Self::State, Box<dyn std::error::Error>>;
 
-    /// Whether the application should reload the state between iterations or may maintain
-    /// a cached copy in memory.
-    fn retain() -> bool;
-}
+        /// Persist the state for loading later by `load`.
+        #[allow(async_fn_in_trait)]
+        async fn save(&self, state: &Self::State) -> Result<(), Box<dyn std::error::Error>>;
 
-pub struct InMemoryPersistence<T> {
-    _phantom: PhantomData<T>,
-}
+        /// Whether the application should reload the state between iterations or may maintain
+        /// a cached copy in memory.
+        fn retain() -> bool;
+    }
 
-impl<T> Default for InMemoryPersistence<T>
-where
-    T: Default,
-{
-    fn default() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
+    pub struct InMemoryPersistence<T> {
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T> Default for InMemoryPersistence<T>
+    where
+        T: Default,
+    {
+        fn default() -> Self {
+            Self {
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<T> StatePersistence for InMemoryPersistence<T>
+    where
+        T: Default,
+    {
+        type State = T;
+
+        async fn load() -> Result<Self::State, Box<dyn std::error::Error>> {
+            let state = T::default();
+            Ok(state)
+        }
+
+        async fn save(&self, _state: &Self::State) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+
+        fn retain() -> bool {
+            true
         }
     }
 }
 
-impl<T> StatePersistence for InMemoryPersistence<T>
-where
-    T: Default,
-{
-    type State = T;
+#[cfg(test)]
+mod test_persistence {
+    use std::error::Error;
 
-    async fn load() -> Result<Self::State, Box<dyn std::error::Error>> {
-        let state = T::default();
-        Ok(state)
-    }
+    use crate::state::{StatePersistence, persist::InMemoryPersistence};
 
-    async fn save(self, _state: &Self::State) -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn load_returns_default_value() -> Result<(), Box<dyn Error>> {
+        let state = <InMemoryPersistence<i32> as StatePersistence>::load().await?;
+
+        assert_eq!(0, state);
+
         Ok(())
     }
 
-    fn retain() -> bool {
-        true
+    #[test]
+    fn retain_true() {
+        let retain = <InMemoryPersistence<i32> as StatePersistence>::retain();
+
+        assert!(retain);
+    }
+
+    #[tokio::test]
+    async fn persist_noop() -> Result<(), Box<dyn Error>> {
+        let persistence = InMemoryPersistence::<i32>::default();
+
+        // Basically we are looking for it to return Ok()
+        persistence.save(&0).await
     }
 }
+
+pub use persist::*;
 
 /// State of a singular row, compared with the computed states to see if there was a change.
 pub struct RowState {
