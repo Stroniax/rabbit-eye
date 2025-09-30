@@ -1,7 +1,9 @@
 use amqprs::{
     Ack, BasicProperties, Cancel, CloseChannel, Deliver, Nack, Return,
     callbacks::ChannelCallback,
-    channel::{BasicAckArguments, BasicConsumeArguments, Channel, QueueDeclareArguments},
+    channel::{
+        BasicAckArguments, BasicConsumeArguments, BasicQosArguments, Channel, QueueDeclareArguments,
+    },
     connection::{Connection, OpenConnectionArguments},
     consumer::AsyncConsumer,
 };
@@ -24,6 +26,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let connection = Connection::open(&args).await?;
 
     let channel = connection.open_channel(None).await?;
+    channel
+        .basic_qos(BasicQosArguments::new(0, 1_000, false))
+        .await?;
 
     eprintln!("Channel open. Declaring queue...");
 
