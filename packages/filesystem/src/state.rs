@@ -1,8 +1,61 @@
-use std::collections::{HashMap, hash_map::Drain};
+use std::{
+    collections::{HashMap, hash_map::Drain},
+    hash::Hash,
+    marker::PhantomData,
+};
 
 use crate::sync::CancellationToken;
 
-// This will have logic for tracking the state of the data that is polled.
+pub trait StatePersistence {
+    type State;
+
+    /// Load the persisted state. This should be a highly tolerant method; if state is corrupted
+    /// it is better to reset than to return an error because the application will not be able
+    /// to resolve an error and will not be able to run.
+    async fn load() -> Result<Self::State, Box<dyn std::error::Error>>;
+
+    /// Persist the state for loading later by `load`.
+    async fn save(self, state: &Self::State) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Whether the application should reload the state between iterations or may maintain
+    /// a cached copy in memory.
+    fn retain() -> bool;
+}
+
+pub struct InMemoryPersistence<T> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T> Default for InMemoryPersistence<T>
+where
+    T: Default,
+{
+    fn default() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> StatePersistence for InMemoryPersistence<T>
+where
+    T: Default,
+{
+    type State = T;
+
+    async fn load() -> Result<Self::State, Box<dyn std::error::Error>> {
+        let state = T::default();
+        Ok(state)
+    }
+
+    async fn save(self, _state: &Self::State) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    fn retain() -> bool {
+        true
+    }
+}
 
 /// State of a singular row, compared with the computed states to see if there was a change.
 pub struct RowState {
