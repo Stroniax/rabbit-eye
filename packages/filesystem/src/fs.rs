@@ -27,21 +27,38 @@ pub async fn check_and_report_files(
 
     let changes = changedetector.rowhash(&state, &cancel).await;
 
-    eprintln!("There are {} pending changes.", changes.len());
-
+    let mut former_state = std::mem::replace(state, crate::state::State::empty());
     for (row, message) in changes {
         let (id, hash) = row.deconstruct();
         state.set_row(id, hash);
 
+        if former_state.pop_row(id).map_or_else(|| true, |h| h != hash)
+            && let Some(message) = message
+        {
+            let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
+            channel
+                .basic_publish(
+                    BasicProperties::default(),
+                    message.path.into_bytes(),
+                    publish_args,
+                )
+                .await?;
+        }
+    }
+
+    let mut del_count = 0;
+    for (id, _hash) in former_state.drain() {
+        del_count += 1;
         let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
         channel
             .basic_publish(
                 BasicProperties::default(),
-                message.path.into_bytes(),
+                id.to_be_bytes().to_vec(),
                 publish_args,
             )
             .await?;
     }
+    eprintln!("Files deleted: {}", del_count);
 
     Ok(())
 }
@@ -96,11 +113,11 @@ impl ChangeDetector for FileChangeDetector {
         &self,
         state: &State,
         cancel: &CancellationToken,
-    ) -> Vec<(RowState, Self::Change)> {
+    ) -> Vec<(RowState, Option<Self::Change>)> {
         let mut dir = vec![self.root.clone()];
 
-        let mut changes = Vec::new();
-        let mut check_count = 0;
+        let mut rows = Vec::new();
+        let mut change_count = 0;
 
         while let Some(root) = dir.pop() {
             if cancel.is_cancelled() {
@@ -128,31 +145,28 @@ impl ChangeDetector for FileChangeDetector {
                 let file_hash = hasher.finish();
                 let change_hash = metadata.last_write_time();
                 let row = RowState::new(file_hash, change_hash);
-                check_count += 1;
-
-                if check_count % 1_000 == 0 {
-                    eprintln!("Processing... {}", check_count);
-                }
 
                 if let Some(stored_hash) = state.row(file_hash)
                     && stored_hash == change_hash
                 {
                     // eprintln!("Not modified: {}", full_name.display());
+                    rows.push((row, None));
                     continue;
                 }
 
                 eprintln!("Modified    : {} at {}", full_name.display(), change_hash);
 
                 let file_change = FileChange {
-                    path,
+                    path: full_name.display().to_string(),
                     last_write_utc: metadata.last_write_time(),
                 };
 
-                changes.push((row, file_change));
+                change_count += 1;
+                rows.push((row, Some(file_change)));
             }
         }
 
-        eprintln!("Changes: {} / {}.", changes.len(), check_count);
-        changes
+        eprintln!("Changes: {} / {}.", change_count, rows.len());
+        rows
     }
 }

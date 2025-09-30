@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Drain};
 
 use crate::sync::CancellationToken;
 
@@ -47,6 +47,14 @@ impl State {
         self.rowhash.get(&id).copied()
     }
 
+    pub fn pop_row(&mut self, id: u64) -> Option<u64> {
+        self.rowhash.remove(&id)
+    }
+
+    pub fn drain(&mut self) -> Drain<'_, u64, u64> {
+        self.rowhash.drain()
+    }
+
     pub fn set_row(&mut self, id: u64, hash: u64) -> () {
         self.rowhash.insert(id, hash);
     }
@@ -66,5 +74,5 @@ pub trait ChangeDetector {
         &self,
         state: &State,
         cancel: &CancellationToken,
-    ) -> Vec<(RowState, Self::Change)>;
+    ) -> Vec<(RowState, Option<Self::Change>)>;
 }
