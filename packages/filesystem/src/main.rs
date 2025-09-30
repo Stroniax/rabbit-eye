@@ -11,15 +11,12 @@ mod sync;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = OpenConnectionArguments::new(
-        &env::var("RABBITMQ_HOST").unwrap(),
-        5672,
-        &env::var("RABBITMQ_USER").unwrap(),
-        &env::var("RABBITMQ_PASS").unwrap(),
+    let connection_options = rabbit::ConnectionOptions::read_from_env().expect(
+        "Missing required environment variable RABBITMQ_HOST, RABBITMQ_USER, or RABBITMQ_PASS.",
     );
-    let connection = Connection::open(&args).await?;
-
-    let channel = connection.open_channel(None).await?;
+    let rmq = rabbit::RabbitMq::connect(connection_options)
+        .await
+        .expect("Unable to connect to RabbitMQ server.");
 
     let period = tokio::time::Duration::from_secs(5);
     let mut interval = tokio::time::interval(period);
@@ -56,7 +53,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ => {}
         }
 
-        let channel_clone = channel.clone();
+        let channel_clone = rmq.default_channel().clone();
         let canc = canc.clone();
         doing_work = Some(tokio::spawn(async move {
             fs::check_and_report_files(&channel_clone).await.unwrap();
