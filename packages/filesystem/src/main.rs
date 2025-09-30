@@ -25,8 +25,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut doing_work: Option<JoinHandle<()>> = None;
 
-    let canc = CancellationToken::new();
+    let cancel = CancellationToken::new();
     let ctx = tokio::sync::Mutex::new(lifetime::AppLifetime::new());
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::State::empty()));
 
     loop {
         let res_or_stop = {
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             print!("Ctrl+C pressed.");
             if let Some(handle) = doing_work.take() {
                 println!(" Halting the application.");
-                if let Err(_) = lifetime::try_graceful_shutdown(handle, &canc).await {
+                if let Err(_) = lifetime::try_graceful_shutdown(handle, &cancel).await {
                     panic!("Failed to gracefully stop the application. Work was aborted.");
                 }
             } else {
@@ -56,9 +57,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let channel_clone = rmq.default_channel().clone();
-        let canc = canc.clone();
+        let cancel = cancel.clone();
+        let state = state.clone();
+
         doing_work = Some(tokio::spawn(async move {
-            fs::check_and_report_files(&channel_clone).await.unwrap();
+            let mut state = state.lock().await;
+            fs::check_and_report_files(&channel_clone, &cancel, &mut state)
+                .await
+                .unwrap();
 
             let mut i = 0;
             let _pod = PrintOnDrop;
@@ -67,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 i = i + 1;
 
-                if canc.is_cancelled() {
+                if cancel.is_cancelled() {
                     println!("Cancellation requested. Breaking loop.");
                     break;
                 }
