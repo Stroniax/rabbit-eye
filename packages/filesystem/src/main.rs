@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut doing_work: Option<JoinHandle<()>> = None;
 
-    let cancel = CancellationToken::new();
+    let mut cancel = CancellationToken::new();
     let ctx = tokio::sync::Mutex::new(lifetime::AppLifetime::new());
     let state = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::State::empty()));
 
@@ -48,12 +48,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        match doing_work.take() {
-            Some(handle) => {
-                println!("Work was ongoing. It is being stopped.");
-                handle.abort();
-            }
-            _ => {}
+        if let Some(mut handle) = doing_work.take() {
+            println!("Work was ongoing. It is being stopped.");
+
+            // Try to gracefully stop it. In case there are too many changes to observe in
+            // the window, and we can batch through because a diff may be faster than full
+            cancel.cancel();
+            cancel = CancellationToken::new();
+
+            tokio::select! {
+                _ = &mut handle => {
+                    eprintln!("Gracefully stopped a previous iteration.");
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    eprintln!("Aborting a previous iteration.");
+                    handle.abort();
+                }
+            };
         }
 
         let channel_clone = rmq.default_channel().clone();
@@ -65,30 +76,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             fs::check_and_report_files(&channel_clone, &cancel, &mut state)
                 .await
                 .unwrap();
-
-            // let mut i = 0;
-            // let _pod = PrintOnDrop;
-            // loop {
-            //     println!("Doing some work (iter {}).", i);
-            //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            //     i = i + 1;
-
-            //     if cancel.is_cancelled() {
-            //         println!("Cancellation requested. Breaking loop.");
-            //         break;
-            //     }
-            // }
         }));
     }
 
     println!("Application gracefully stopped.");
 
     Ok(())
-}
-
-struct PrintOnDrop;
-impl Drop for PrintOnDrop {
-    fn drop(&mut self) {
-        println!("Dropped.");
-    }
 }
