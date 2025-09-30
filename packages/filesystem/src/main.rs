@@ -66,18 +66,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .unwrap();
 
-            let mut i = 0;
-            let _pod = PrintOnDrop;
-            loop {
-                println!("Doing some work (iter {}).", i);
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                i = i + 1;
+            // let mut i = 0;
+            // let _pod = PrintOnDrop;
+            // loop {
+            //     println!("Doing some work (iter {}).", i);
+            //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            //     i = i + 1;
 
-                if cancel.is_cancelled() {
-                    println!("Cancellation requested. Breaking loop.");
-                    break;
-                }
-            }
+            //     if cancel.is_cancelled() {
+            //         println!("Cancellation requested. Breaking loop.");
+            //         break;
+            //     }
+            // }
         }));
     }
 
