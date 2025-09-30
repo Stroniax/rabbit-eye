@@ -1,6 +1,5 @@
-use amqprs::connection::{Connection, OpenConnectionArguments};
-use std::{env, error::Error};
-use tokio::{select, task::JoinHandle};
+use std::error::Error;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod fs;
@@ -8,9 +7,11 @@ mod lifetime;
 mod rabbit;
 mod state;
 mod sync;
+mod time;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Connect to RabbitMQ
     let connection_options = rabbit::ConnectionOptions::read_from_env().expect(
         "Missing required environment variable RABBITMQ_HOST, RABBITMQ_USER, or RABBITMQ_PASS.",
     );
@@ -18,8 +19,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .expect("Unable to connect to RabbitMQ server.");
 
-    let period = tokio::time::Duration::from_secs(5);
-    let mut interval = tokio::time::interval(period);
+    // Run work in a loop
+    let schedule_options = time::ScheduleOptions::default();
+    let mut interval = tokio::time::interval(schedule_options.interval());
 
     let mut doing_work: Option<JoinHandle<()>> = None;
 
