@@ -85,15 +85,6 @@ impl FileChangeDetector {
     }
 }
 
-struct EPrintLnDrop {
-    message: String,
-}
-impl Drop for EPrintLnDrop {
-    fn drop(&mut self) {
-        eprintln!("{}", self.message)
-    }
-}
-
 impl ChangeDetector for FileChangeDetector {
     type Change = FileChange;
 
@@ -106,10 +97,6 @@ impl ChangeDetector for FileChangeDetector {
         state: &State,
         cancel: &CancellationToken,
     ) -> Vec<(RowState, Self::Change)> {
-        let _drop = EPrintLnDrop {
-            message: String::from("The row hash was cancelled, aborted, or gracefully ended."),
-        };
-
         let mut dir = vec![self.root.clone()];
 
         let mut changes = Vec::new();
@@ -131,9 +118,9 @@ impl ChangeDetector for FileChangeDetector {
                 let path = file.file_name().into_string().unwrap();
                 let metadata = file.metadata().await.unwrap();
 
+                let full_name = root.join(file.file_name());
                 if self.recursive && metadata.is_dir() {
-                    let other = root.join(file.file_name());
-                    dir.push(other);
+                    dir.push(full_name.clone());
                 }
 
                 let mut hasher = std::hash::DefaultHasher::new();
@@ -150,11 +137,11 @@ impl ChangeDetector for FileChangeDetector {
                 if let Some(stored_hash) = state.row(file_hash)
                     && stored_hash == change_hash
                 {
-                    // eprintln!("Not modified: {:?}", root.join(file.file_name()));
+                    // eprintln!("Not modified: {}", full_name.display());
                     continue;
                 }
 
-                eprintln!("Modified    : {:?}", root.join(file.file_name()));
+                eprintln!("Modified    : {} at {}", full_name.display(), change_hash);
 
                 let file_change = FileChange {
                     path,
