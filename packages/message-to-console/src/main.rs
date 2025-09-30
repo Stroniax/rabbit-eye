@@ -6,7 +6,12 @@ use amqprs::{
     consumer::AsyncConsumer,
 };
 use async_trait::async_trait;
-use std::{env, error::Error};
+use chrono::{DateTime, Local, Utc};
+use std::{
+    env,
+    error::Error,
+    time::{Instant, SystemTime},
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -141,10 +146,12 @@ impl AsyncConsumer for PrintlnConsumer {
         content: Vec<u8>,
     ) {
         println!(
-            "Consumed message on channel {}: delivery_tag={}, content size={}",
-            channel,
+            "{} (#{} on channel {}) content size={}\n{:?}",
+            Into::<DateTime<Local>>::into(SystemTime::now()).format("%H:%M:%S.%f"),
             deliver.delivery_tag(),
-            content.len()
+            channel,
+            content.len(),
+            String::from_utf8(content)
         );
 
         let result = channel
