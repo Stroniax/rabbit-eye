@@ -48,7 +48,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        if let Some(mut handle) = doing_work.take() {
+        if let Some(mut handle) = doing_work.take()
+            && !handle.is_finished()
+        {
             println!("Work was ongoing. It is being stopped.");
 
             // Try to gracefully stop it. In case there are too many changes to observe in
