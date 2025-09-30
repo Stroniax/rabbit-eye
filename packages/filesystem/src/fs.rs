@@ -1,9 +1,9 @@
-use crate::state::{ChangeDetector, RowState, State};
 use crate::sync::CancellationToken;
 use amqprs::{
     BasicProperties,
     channel::{BasicPublishArguments, Channel},
 };
+use rabbit_eye::state::{ChangeDetector, RowState, State};
 use std::hash::{Hash, Hasher};
 use std::{error::Error, os::windows::fs::MetadataExt, path::PathBuf};
 
@@ -27,7 +27,7 @@ pub async fn check_and_report_files(
 
     let changes = changedetector.rowhash(&state, &cancel).await;
 
-    let mut former_state = std::mem::replace(state, crate::state::State::empty());
+    let mut former_state = std::mem::replace(state, rabbit_eye::state::State::empty());
     for (row, message) in changes {
         let (id, hash) = row.deconstruct();
         state.set_row(id, hash);

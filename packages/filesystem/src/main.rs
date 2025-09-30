@@ -1,13 +1,9 @@
+use rabbit_eye::{lifetime, rabbit, sync, time};
 use std::error::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod fs;
-mod lifetime;
-mod rabbit;
-mod state;
-mod sync;
-mod time;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -27,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut cancel = CancellationToken::new();
     let ctx = tokio::sync::Mutex::new(lifetime::AppLifetime::new());
-    let state = std::sync::Arc::new(tokio::sync::Mutex::new(crate::state::State::empty()));
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(rabbit_eye::state::State::empty()));
 
     loop {
         let res_or_stop = {
