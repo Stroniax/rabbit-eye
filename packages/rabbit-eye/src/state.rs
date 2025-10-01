@@ -115,21 +115,20 @@ mod state_change {
         Delete(Key),
     }
 
-    pub trait TableState {
-        type Key;
-        type Hash;
+    pub trait TableState<Key, Hash>: Default {
+        fn tablehash(&self) -> Option<u64>;
 
         /// Notifies the state that the key is present, and has the provided hash.
         /// Internally, the state shall record the change type from its internal
         /// state of the key.
-        fn set_row(&mut self, key: Self::Key, hash: Self::Hash);
+        fn set_row(&mut self, key: Key, hash: Hash);
 
         /// Consumes the state and produces the change set. This change set should be merged into
         /// persistence and notified to the message bus.
         /// `delete_remainder` determines if anything not passed to `set_presence` should be
         /// considered deleted. This flag should be set if the state was able to be updated
         /// fully, and should be `false` if the change detector was stopped prematurely.
-        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Self::Key>>;
+        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>>;
     }
 
     #[derive(Debug)]
@@ -155,15 +154,16 @@ mod state_change {
         }
     }
 
-    impl<Key, Hash> TableState for DefaultTableState<Key, Hash>
+    impl<Key, Hash> TableState<Key, Hash> for DefaultTableState<Key, Hash>
     where
         Key: Eq + std::hash::Hash + Clone,
         Hash: Eq,
     {
-        type Key = Key;
-        type Hash = Hash;
+        fn tablehash(&self) -> Option<u64> {
+            self.tablehash
+        }
 
-        fn set_row(&mut self, key: Self::Key, hash: Self::Hash) {
+        fn set_row(&mut self, key: Key, hash: Hash) {
             if let Some(value) = self.rows.get_mut(&key) {
                 if value == &hash {
                     self.changes.push(NotifiedState::None(key));
@@ -177,7 +177,7 @@ mod state_change {
             }
         }
 
-        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Self::Key>> {
+        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>> {
             // For each item in self.rows, check for a change in self.changes.
             // If there is no change and delete_remainder = true, produce a Delete
             // If there is a change, map it to the proper change type
@@ -299,75 +299,44 @@ mod test_state_change {
 
 pub use state_change::*;
 
-/// State of a singular row, compared with the computed states to see if there was a change.
-pub struct RowState {
-    id: u64,
-    hash: u64,
-}
+mod change {
+    use super::state_change::TableState;
+    use crate::sync::CancellationToken;
 
-impl RowState {
-    pub fn new(id: u64, hash: u64) -> Self {
-        Self { id, hash }
+    /// This is the core logic that needs implemented per-application. The change detector resolves
+    /// a change set by mutating `state` via the `rowhash` function.
+    pub trait ChangeDetector {
+        type Key;
+        type Hash;
+
+        /// Produces a hash of the entire observed set. If the change detector cannot reasonably
+        /// hash the entire set, it should return None.
+        async fn tablehash(&mut self, cancel: &CancellationToken) -> Option<u64>;
+
+        /// Produces the change set from state. It does not need to modify `State` as the engine will
+        /// handle updating each row. The returned `Vec` must consist of (rowid, hash, messagebody).
+        /// If `cancel` is triggered during this call, return early with the changes that are known.
+        async fn rowhash(
+            self,
+            state: &mut impl TableState<Self::Key, Self::Hash>,
+            cancel: &CancellationToken,
+        ) -> ChangeDetectorResult;
     }
 
-    pub fn deconstruct(self) -> (u64, u64) {
-        (self.id, self.hash)
-    }
-}
-
-/// State of a set of data, first the tablehash is compared and if different, then the rowhash is
-/// compared to see if there was a change. If there is no way to determine a tablehash, the value
-/// should be set to 0 and the `ChangeDetector` should return a nonzero value.
-pub struct State {
-    /// Hash of the entire set.
-    tablehash: Option<u64>,
-
-    /// Map produced from from `RowState`. Maps id to hash.
-    rowhash: HashMap<u64, u64>,
-}
-
-impl State {
-    pub fn empty() -> Self {
-        Self {
-            tablehash: None,
-            rowhash: HashMap::new(),
-        }
-    }
-
-    pub fn table(&self) -> Option<u64> {
-        self.tablehash
-    }
-
-    pub fn row(&self, id: u64) -> Option<u64> {
-        self.rowhash.get(&id).copied()
-    }
-
-    pub fn pop_row(&mut self, id: u64) -> Option<u64> {
-        self.rowhash.remove(&id)
-    }
-
-    pub fn drain(&mut self) -> Drain<'_, u64, u64> {
-        self.rowhash.drain()
-    }
-
-    pub fn set_row(&mut self, id: u64, hash: u64) -> () {
-        self.rowhash.insert(id, hash);
+    pub enum ChangeDetectorResult {
+        /// It canceled early. Save the changes to `state` but do not delete the unidentified rows.
+        Cancelled,
+        /// It finished. Rows not identified in `state` must have been deleted.
+        DeleteRemainder,
+        /// It was abruptly terminated. Do not publish any notifications or change `state`.
+        Aborted,
+        /// A temporal error was encountered. The system expects that the error will not be
+        /// permanent, such that re-attempting the operation in the future is expected to succeed.
+        /// The fault should contain an error code that can be cross-ref'd against the documentation
+        /// and possibly be used as an application exit code if the error occurs too many times in
+        /// a row.
+        Faulted(u8),
     }
 }
 
-pub trait ChangeDetector {
-    type Change;
-
-    /// Produces a hash of the entire observed set. If the change detector cannot reasonably
-    /// hash the entire set, it should return None.
-    async fn tablehash(&self, cancel: &CancellationToken) -> Option<u64>;
-
-    /// Produces the change set from state. It does not need to modify `State` as the engine will
-    /// handle updating each row. The returned `Vec` must consist of (rowid, hash, messagebody).
-    /// If `cancel` is triggered during this call, return early with the changes that are known.
-    async fn rowhash(
-        &self,
-        state: &State,
-        cancel: &CancellationToken,
-    ) -> Vec<(RowState, Option<Self::Change>)>;
-}
+pub use change::*;
