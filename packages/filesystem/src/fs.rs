@@ -24,6 +24,7 @@ pub async fn check_and_report_files(
         && let Some(current) = changedetector.tablehash(&cancel).await
         && former == current
     {
+        println!("No changes in table state.");
         return Ok(());
     }
 
@@ -36,16 +37,32 @@ pub async fn check_and_report_files(
         ChangeDetectorResult::Faulted(_) => false,
     };
 
+    let mut new = 0;
+    let mut del = 0;
+    let mut upd = 0;
     for change in state.drain(delete_remainder) {
-        match change {
-            StateChange::New(val) | StateChange::Update(val) | StateChange::Delete(val) => {
-                let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
-                channel
-                    .basic_publish(BasicProperties::default(), val.into_bytes(), publish_args)
-                    .await?;
+        let val = match change {
+            StateChange::New(val) => {
+                new += 1;
+                val
             }
-        }
+            StateChange::Update(val) => {
+                upd += 1;
+                val
+            }
+            StateChange::Delete(val) => {
+                del += 1;
+                val
+            }
+        };
+
+        let publish_args = BasicPublishArguments::new("", "rabbit-eye-dev");
+        channel
+            .basic_publish(BasicProperties::default(), val.into_bytes(), publish_args)
+            .await?;
     }
+
+    println!("{} new, {} changed, {} deleted.", new, upd, del);
 
     Ok(())
 }
@@ -103,6 +120,7 @@ impl ChangeDetector for FileChangeDetector {
         cancel: &CancellationToken,
     ) -> ChangeDetectorResult {
         let mut dir = vec![self.root.clone()];
+        let mut i = 0;
 
         while let Some(root) = dir.pop() {
             if cancel.is_cancelled() {
@@ -127,8 +145,11 @@ impl ChangeDetector for FileChangeDetector {
                 let change_hash = metadata.last_write_time();
 
                 state.set_row(full_name.display().to_string(), change_hash);
+                i += 1;
             }
         }
+
+        println!("{} file(s) scanned.", i);
 
         ChangeDetectorResult::DeleteRemainder
     }
