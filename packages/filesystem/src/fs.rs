@@ -14,6 +14,7 @@ pub async fn check_and_report_files(
     cancel: &CancellationToken,
     state: &mut impl TableState<String, u64>,
 ) -> Result<(), Box<dyn Error>> {
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     let root = PathBuf::from(std::env::current_dir()?);
     let mut changedetector = FileChangeDetector::new(root)
         .with_recursive(true)
