@@ -46,25 +46,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        if let Some(mut handle) = doing_work.take()
-            && !handle.is_finished()
-        {
-            println!("Work was ongoing. It is being stopped.");
+        if let Some(mut handle) = doing_work.take() {
+            if handle.is_finished() {
+                // Join to observe result
+                handle.await?;
+            } else {
+                println!("Work was ongoing. It is being stopped.");
 
-            // Try to gracefully stop it. In case there are too many changes to observe in
-            // the window, and we can batch through because a diff may be faster than full
-            cancel.cancel();
-            cancel = CancellationToken::new();
+                // Try to gracefully stop it. In case there are too many changes to observe in
+                // the window, and we can batch through because a diff may be faster than full
+                cancel.cancel();
+                cancel = CancellationToken::new();
 
-            tokio::select! {
-                _ = &mut handle => {
-                    eprintln!("Gracefully stopped a previous iteration.");
-                },
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                    eprintln!("Aborting a previous iteration.");
-                    handle.abort();
-                }
-            };
+                tokio::select! {
+                    _ = &mut handle => {
+                        eprintln!("Gracefully stopped a previous iteration.");
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        eprintln!("Aborting a previous iteration.");
+                        handle.abort();
+                        _ = handle.await;
+                    }
+                };
+            }
         }
 
         let channel_clone = rmq.default_channel().clone();
