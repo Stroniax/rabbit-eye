@@ -9,15 +9,11 @@ use rabbit_eye::state::{
 use std::hash::{Hash, Hasher};
 use std::{error::Error, os::windows::fs::MetadataExt, path::PathBuf};
 
-pub async fn check_and_report_files<T>(
+pub async fn check_and_report_files(
     channel: &Channel,
     cancel: &CancellationToken,
-    mut state: T,
-) -> Result<(), Box<dyn Error>>
-where
-    T: TableState<String, u64>,
-    for<'a> &'a mut T: TableState<String, u64>,
-{
+    state: &mut impl TableState<String, u64>,
+) -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(std::env::current_dir()?);
     let mut changedetector = FileChangeDetector::new(root)
         .with_recursive(true)
@@ -31,7 +27,7 @@ where
         return Ok(());
     }
 
-    let changes = changedetector.rowhash(&mut state, &cancel).await;
+    let changes = changedetector.rowhash(&mut *state, &cancel).await;
 
     let delete_remainder = match changes {
         ChangeDetectorResult::Aborted => return Ok(()),

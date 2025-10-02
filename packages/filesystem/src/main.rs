@@ -23,7 +23,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut cancel = CancellationToken::new();
     let ctx = tokio::sync::Mutex::new(lifetime::AppLifetime::new());
-    let state = std::sync::Arc::new(tokio::sync::Mutex::new(rabbit_eye::state::State::empty()));
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(
+        rabbit_eye::state::DefaultTableState::<String, u64>::default(),
+    ));
 
     loop {
         let res_or_stop = {
@@ -71,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         doing_work = Some(tokio::spawn(async move {
             let mut state = state.lock().await;
-            fs::check_and_report_files(&channel_clone, &cancel, &mut state)
+            fs::check_and_report_files(&channel_clone, &cancel, &mut *state)
                 .await
                 .unwrap();
         }));

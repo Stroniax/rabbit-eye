@@ -108,7 +108,7 @@ mod state_change {
     }
 
     #[derive(Debug)]
-    pub enum NotifiedState<Key> {
+    enum NotifiedState<Key> {
         None(Key),
         New(Key),
         Update(Key),
@@ -123,12 +123,12 @@ mod state_change {
         /// state of the key.
         fn set_row(&mut self, key: Key, hash: Hash);
 
-        /// Consumes the state and produces the change set. This change set should be merged into
+        /// Consumes the change queue and produces the change set. This change set should be merged into
         /// persistence and notified to the message bus.
         /// `delete_remainder` determines if anything not passed to `set_presence` should be
         /// considered deleted. This flag should be set if the state was able to be updated
         /// fully, and should be `false` if the change detector was stopped prematurely.
-        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>>;
+        fn drain(&mut self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>>;
     }
 
     #[derive(Debug)]
@@ -177,7 +177,7 @@ mod state_change {
             }
         }
 
-        fn drain(self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>> {
+        fn drain(&mut self, delete_remainder: bool) -> impl Iterator<Item = StateChange<Key>> {
             // For each item in self.rows, check for a change in self.changes.
             // If there is no change and delete_remainder = true, produce a Delete
             // If there is a change, map it to the proper change type
@@ -193,7 +193,8 @@ mod state_change {
                 }
             }
 
-            for seen in self.changes {
+            let was_changes = std::mem::replace(&mut self.changes, vec![]);
+            for seen in was_changes {
                 match seen {
                     NotifiedState::Delete(k) => {
                         unseen.remove(&k);
@@ -246,7 +247,7 @@ mod test_state_change {
     fn drain_delete_no_remainder() {
         let mut hash = HashMap::new();
         hash.insert(1, 31);
-        let ts = DefaultTableState::new(None, hash);
+        let mut ts = DefaultTableState::new(None, hash);
 
         let drain: Vec<_> = ts.drain(false).collect();
 
@@ -257,7 +258,7 @@ mod test_state_change {
     fn drain_delete_remainder() {
         let mut hash = HashMap::new();
         hash.insert(1, 31);
-        let ts = DefaultTableState::new(None, hash);
+        let mut ts = DefaultTableState::new(None, hash);
 
         let drain: Vec<_> = ts.drain(true).collect();
 
