@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::Display,
+    io::Write,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -8,165 +9,235 @@ use tokio::{
     signal::ctrl_c,
     spawn,
     task::{JoinError, JoinHandle},
-    time::{interval, sleep},
+    time::{Interval, interval, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
-    // This token is the master token of the application. When it is triggered
-    // the program aborts immediately.
-    let abort_token = CancellationToken::new();
+    let life = AppLifetime::start();
 
-    // This token is the first to cancel, which stops iterating but does not stop any ongoing work.
-    let stop_looping_token = abort_token.child_token();
-
-    // This token is the second to cancel, which gives ongoing work an opportunity to stop.
-    let graceful_stop_token = stop_looping_token.child_token();
-
-    // This token is the clone that `cancel` is called on when 5s after the Ctrl+C
-    let ctrlc_stop_looping_token = stop_looping_token.clone();
-    let ctrlc_graceful_stop_token = graceful_stop_token.clone();
-    let ctrlc_abort_token = abort_token.clone();
-
-    _ = spawn(async move {
-        if let Err(_) = ctrl_c().await {
-            eprintln!("Failed to register listener for Ctrl+C.");
-            return;
-        }
-
-        // Stop the loop from iterating.
-        eprintln!("Shutdown in progress. Ctrl+C pressed. Allowing program to complete.");
-        ctrlc_stop_looping_token.cancel();
-
-        // Allow 5s for regular termination
-        let secs_5 = Duration::from_secs(5);
-        sleep(secs_5).await;
-
-        // Trigger cancellation token and allow 5s for graceful termination
-        eprintln!("Shutdown in progress. Gracefully terminating running processes.");
-        ctrlc_graceful_stop_token.cancel();
-        sleep(secs_5).await;
-
-        // Abort the listener
-        eprintln!("Shutdown in progress. Aborting running processes.");
-        ctrlc_abort_token.cancel();
-    });
-
-    let loop_task = run_loop(stop_looping_token, graceful_stop_token);
-    let loop_task_cancelable = abort_token.run_until_cancelled_owned(loop_task).await;
-
-    loop_task_cancelable.unwrap_or(Err(Box::new(CancelledError)))?;
+    let loop_worker = loop_until_cancel(life.natural(), life.graceful());
+    life.run_until_abort(loop_worker).await;
 
     Ok(())
 }
 
-#[derive(Debug)]
-struct CancelledError;
+async fn loop_until_cancel(stop_loop: CancellationToken, stop_work: CancellationToken) {
+    let dur = Duration::from_secs(5);
+    let mut interval = interval(dur);
 
-impl Display for CancelledError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cancelled")?;
+    let mut work = RenewableWorker::new();
+    while !stop_loop.is_cancelled() {
+        println!("Waiting for next interval...");
+        if let None = stop_loop.run_until_cancelled(interval.tick()).await {
+            break;
+        }
+
+        let token = stop_work.child_token();
+        let work_token = token.clone();
+        print!("Next interval reached. Work is running... ");
+        work.finish_and_renew(
+            async move {
+                for i in 1..15 {
+                    work_token
+                        .run_until_cancelled(sleep(Duration::from_secs(1)))
+                        .await;
+                    print!("{} ", i);
+                    _ = std::io::stdout().flush();
+                }
+                println!("!");
+            },
+            token,
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+
+    // Try to wait for the work to complete, unless the `stop_work` token is cancelled
+    _ = stop_work.run_until_cancelled(work.wait()).await;
+
+    // Then try canceling it, and aborting if that does not work
+    _ = work.close_with_abort_after(Duration::from_secs(5)).await;
+
+    println!("Work stopped.");
+}
+
+struct RenewableWorker {
+    handle: Option<(JoinHandle<()>, CancellationToken)>,
+}
+
+async fn wait_or_abort<T>(handle: JoinHandle<T>) -> Result<T, JoinError> {
+    let h = AbortOnDropJoinHandle::new(handle);
+    h.wait().await
+}
+
+struct AbortOnDropJoinHandle<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AbortOnDropJoinHandle<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn wait(mut self) -> Result<T, JoinError> {
+        if let Some(handle) = self.handle.as_mut() {
+            let res = handle.await;
+            self.handle = None;
+            res
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl<T> Drop for AbortOnDropJoinHandle<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort()
+        }
+    }
+}
+
+impl RenewableWorker {
+    fn new() -> Self {
+        Self { handle: None }
+    }
+
+    /// Stops current work (natural 5s, graceful 5s, then aborts).
+    /// Then starts the new future `f`.
+    ///
+    /// It will cancel the token immediately, then wait `grace_period` to see if the previous task
+    /// finishes gracefully. If not, the previous task will be aborted.
+    pub async fn finish_and_renew<F>(&mut self, f: F, t: CancellationToken, grace_period: Duration)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if let Some((mut handle, cancel)) = self.handle.take() {
+            cancel.cancel();
+            select! {
+                _ = sleep(grace_period) => {
+                    handle.abort()
+                }
+                _ = &mut handle => {
+                }
+            }
+        }
+
+        let handle = spawn(f);
+        self.handle = Some((handle, t));
+    }
+
+    pub async fn wait(&mut self) -> Result<(), JoinError> {
+        if let Some((handle, _)) = self.handle.as_mut() {
+            handle.await?;
+        }
 
         Ok(())
     }
+
+    pub async fn close_with_abort_after(
+        mut self,
+        abort_after: Duration,
+    ) -> Option<Result<(), JoinError>> {
+        if let Some((handle, cancel)) = self.handle.take() {
+            cancel.cancel();
+
+            let waiter = AbortOnDropJoinHandle::new(handle);
+            select! {
+                r = waiter.wait() => Some(r),
+                _ = sleep(abort_after) => None
+            }
+        } else {
+            Some(Ok(()))
+        }
+    }
 }
 
-impl Error for CancelledError {
-    fn cause(&self) -> Option<&dyn Error> {
-        None
-    }
-
-    fn description(&self) -> &str {
-        "The operation was cancelled."
-    }
-
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+impl Drop for RenewableWorker {
+    fn drop(&mut self) {
+        if let Some((handle, _)) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
-async fn run_loop(
-    stop_looping: CancellationToken,
-    graceful_stop: CancellationToken,
-) -> Result<(), Box<dyn Error>> {
-    let duration = Duration::from_secs(5);
-    let mut interval = interval(duration);
-    let mut iter_i = 0;
+pub struct AppLifetime {
+    handle: JoinHandle<()>,
+    abort: CancellationToken,
+    graceful: CancellationToken,
+    natural: CancellationToken,
+}
 
-    let mut work_handle: Option<JoinHandleWithTimeout<_>> = None;
+impl AppLifetime {
+    fn start() -> Self {
+        let abort = CancellationToken::new();
+        let graceful = abort.child_token();
+        let natural = graceful.child_token();
 
-    loop {
-        println!("Waiting for next scheduled iteration {}.", iter_i);
-        let wait_result = stop_looping.run_until_cancelled(interval.tick()).await;
+        let ctrlc_abort = abort.clone();
+        let ctrlc_graceful = graceful.clone();
+        let ctrlc_natural = natural.clone();
 
-        match wait_result {
-            Some(instant) => {
-                println!("{:?} Interval {} elapsed.", instant.elapsed(), iter_i);
-                iter_i += 1;
+        let handle = spawn(async move {
+            _ = ctrl_c().await;
+            let five_secs = Duration::from_secs(5);
 
-                if let Some(old_work) = work_handle.take() {
-                    println!(
-                        "{:?} Waiting for previous iteration to complete.",
-                        instant.elapsed()
-                    );
-                    old_work.run_until_abort().await?;
-                }
+            // Indicate natural stop, and wait 5s
+            eprintln!("Stopping. Attempting natural stop.");
+            ctrlc_natural.cancel();
+            ctrlc_graceful.run_until_cancelled(sleep(five_secs)).await;
 
-                let iter_n = iter_i;
-                let stop_subtask = graceful_stop.child_token();
-                let stop_previous = stop_subtask.clone();
-                let work = spawn(async move {
-                    _ = run_iter(iter_n, stop_subtask).await;
-                });
-                work_handle = Some(JoinHandleWithTimeout::new(work, stop_previous));
-            }
-            None => {
-                println!("Interval interrupted.");
-                break;
-            }
+            // Indicate graceful stop, and wait 5s
+            eprintln!("Stopping. Attempting graceful stop.");
+            ctrlc_graceful.cancel();
+            ctrlc_abort.run_until_cancelled(sleep(five_secs)).await;
+
+            // Indicate abort and end this task. Anything racing this task will be stopped.
+            eprintln!("Stopping. Aborting.");
+            ctrlc_abort.cancel();
+        });
+
+        Self {
+            handle,
+            abort,
+            graceful,
+            natural,
         }
     }
 
-    if let Some((work, _)) = work_handle {
-        eprintln!("Waiting for last work to clean up.");
-        work.await?;
-    }
-
-    Ok(())
-}
-
-async fn run_iter(i: usize, graceful_stop: CancellationToken) -> Result<(), Box<dyn Error>> {
-    println!("Running iteration {}.", i);
-    graceful_stop
-        .run_until_cancelled(sleep(Duration::from_secs(10)))
-        .await
-        .map_or_else(|| Err(CancelledError), |_| Ok(()))
-        .inspect_err(|_| eprintln!("Iteration {} was terminated.", i))?;
-    println!("Iteration complete {}.", i);
-    Ok(())
-}
-
-struct JoinHandleWithTimeout<T> {
-    handle: JoinHandle<T>,
-    cancel: CancellationToken,
-}
-
-impl<T> JoinHandleWithTimeout<T> {
-    fn new(handle: JoinHandle<T>, cancel: CancellationToken) -> Self {
-        Self { handle, cancel }
-    }
-
-    /// Waits for the join handle to finish. If the token is cancelled,
-    /// the join handle is aborted.
-    async fn run_until_abort(mut self) -> Result<T, JoinError> {
+    /// Runs a future until this app lifetime abort token is cancelled.
+    async fn run_until_abort<F>(&self, future: F) -> Option<F::Output>
+    where
+        F: Future,
+    {
         select! {
-            r = &mut self.handle => {
-                r
-            },
-            _ = self.cancel.cancelled() => {
-                self.handle.abort();
-                self.handle.await
-            }
+            _ = self.abort.cancelled() => None,
+            v = future => Some(v),
         }
+    }
+
+    async fn run_until_abort_owned<F>(self, future: F) -> Result<F::Output, ()>
+    where
+        F: Future,
+    {
+        select! {
+            _ = self.handle => Err(()),
+            v = future => Ok(v),
+        }
+    }
+
+    fn abort(&self) -> CancellationToken {
+        self.abort.clone()
+    }
+
+    fn graceful(&self) -> CancellationToken {
+        self.graceful.clone()
+    }
+
+    fn natural(&self) -> CancellationToken {
+        self.natural.clone()
     }
 }
